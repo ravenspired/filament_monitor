@@ -213,8 +213,9 @@ def main():
 
     current_uid = None
     current_state = None
-    last_detection_ms = 0
-    seen_once = False
+    last_seen_ms = 0
+    rotation_armed = False
+    rotation_detected = False
 
     print("Filament monitor ready. Waiting for tags...")
 
@@ -235,36 +236,43 @@ def main():
                     print("Tag has no filament data.")
                     current_state = None
                     current_uid = None
-                    seen_once = False
+                    rotation_armed = False
+                    rotation_detected = False
                 else:
                     try:
                         current_state = normalise_tag_data(data)
                         current_uid = uid_bytes
-                        seen_once = False
-                        last_detection_ms = now
+                        rotation_armed = False
+                        rotation_detected = False
                         print("Loaded filament tag:", current_state["data"])
                     except Exception as err:
                         print("Tag parse error:", err)
                         current_state = None
                         current_uid = None
-                        seen_once = False
+                        rotation_armed = False
+                        rotation_detected = False
             else:
-                # Tag is still present
-                last_detection_ms = now
-                if not seen_once:
-                    seen_once = True
-
-        else:  # no tag currently seen
+                # Same tag reappeared
+                if current_state:
+                    if rotation_detected:
+                        # Tag was gone long enough for a rotation, now write
+                        consume_filament_rotation(pn532, current_state)
+                        rotation_detected = False
+                    rotation_armed = True
+            last_seen_ms = now
+        else:
             if current_uid:
-                # Check if it’s been gone long enough to count a rotation
-                gap = time.ticks_diff(now, last_detection_ms)
-                if current_state and seen_once and gap >= TAG_ABSENCE_MS:
-                    consume_filament_rotation(pn532, current_state)
+                gap = time.ticks_diff(now, last_seen_ms)
+                if rotation_armed and gap >= TAG_ABSENCE_MS:
+                    # Tag has been gone long enough - mark rotation detected
+                    # but don't write yet, wait for tag to reappear
+                    rotation_detected = True
+                    rotation_armed = False
                 elif gap >= TAG_ABSENCE_MS * 4:
-                    # Fully reset state after prolonged absence
                     current_uid = None
                     current_state = None
-                    seen_once = False
+                    rotation_armed = False
+                    rotation_detected = False
 
 
         display_cycler.update(current_uid, current_state)
@@ -286,7 +294,9 @@ def consume_filament_rotation(pn532, state):
     data["grams_rem"] = round(max(data["grams_rem"], 0.0), 3)
 
     try:
+        print("Starting tag write...")
         tag_storage.write_ndef_json(pn532, data)
+        print("Tag write complete.")
         print(
             "Rotation consumed: -{:.3f} m, -{:.3f} g -> remaining {:.3f} m / {:.3f} g".format(
                 meters_step, grams_step, data["meters_rem"], data["grams_rem"]
