@@ -268,11 +268,8 @@ def main():
                     # but don't write yet, wait for tag to reappear
                     rotation_detected = True
                     rotation_armed = False
-                elif gap >= TAG_ABSENCE_MS * 4:
-                    current_uid = None
-                    current_state = None
-                    rotation_armed = False
-                    rotation_detected = False
+                # Keep state in memory even after long absence - only reset
+                # if a different tag appears or if explicitly cleared
 
 
         display_cycler.update(current_uid, current_state)
