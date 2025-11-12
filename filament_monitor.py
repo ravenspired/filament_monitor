@@ -249,19 +249,23 @@ def main():
                         current_uid = None
                         seen_once = False
             else:
+                # Tag is still present
+                last_detection_ms = now
+                if not seen_once:
+                    seen_once = True
+
+        else:  # no tag currently seen
+            if current_uid:
+                # Check if it’s been gone long enough to count a rotation
                 gap = time.ticks_diff(now, last_detection_ms)
                 if current_state and seen_once and gap >= TAG_ABSENCE_MS:
                     consume_filament_rotation(pn532, current_state)
-                    last_detection_ms = now
-                else:
-                    last_detection_ms = now
-                if not seen_once:
-                    seen_once = True
-        else:
-            if current_uid and time.ticks_diff(now, last_detection_ms) > TAG_ABSENCE_MS * 4:
-                current_uid = None
-                current_state = None
-                seen_once = False
+                elif gap >= TAG_ABSENCE_MS * 4:
+                    # Fully reset state after prolonged absence
+                    current_uid = None
+                    current_state = None
+                    seen_once = False
+
 
         display_cycler.update(current_uid, current_state)
         time.sleep_ms(LOOP_DELAY_MS)
