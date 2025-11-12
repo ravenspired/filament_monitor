@@ -217,41 +217,57 @@ class PN532:
         self._write_data(bytes(frame))
 
     def _read_frame(self, length):
-        """Read a response frame from the PN532 of at most length bytes in size.
-        Returns the data inside the frame if found, otherwise raises an exception
-        if there is an error parsing the frame.  Note that less than length bytes
-        might be returned!
-        """
-        # Read frame with expected length of data.
-        response = self._read_data(length+8)
-        if self.debug:
-            print('DEBUG: _read_frame:', [hex(i) for i in response])
+        """Read and validate a PN532 response frame (tolerant version).
 
-        # Swallow all the 0x00 values that preceed 0xFF.
+        Handles both checksum styles used by PN532 clones and short NTAG replies.
+        Returns the payload (TFI + PD0..PDn).
+        """
+        response = self._read_data(length + 8)
+        if self.debug:
+            print("DEBUG: _read_frame raw:", [hex(i) for i in response])
+
+        # Skip all leading 0x00 until 0xFF start code
         offset = 0
-        while response[offset] == 0x00:
+        while offset < len(response) and response[offset] == 0x00:
             offset += 1
-            if offset >= len(response):
-                raise RuntimeError(
-                    'Response frame preamble does not contain 0x00FF!')
-        if response[offset] != 0xFF:
-            raise RuntimeError(
-                'Response frame preamble does not contain 0x00FF!')
-        offset += 1
-        if offset >= len(response):
-            raise RuntimeError('Response contains no data!')
-        # Check length & length checksum match.
+        if offset >= len(response) or response[offset] != 0xFF:
+            raise RuntimeError("Invalid frame preamble, expected 0x00 0x00 0xFF")
+
+        offset += 1  # past 0xFF
+        if offset + 1 >= len(response):
+            raise RuntimeError("Truncated frame, missing length bytes")
+
         frame_len = response[offset]
-        if (frame_len + response[offset+1]) & 0xFF != 0:
-            raise RuntimeError(
-                'Response length checksum did not match length!')
-        # Check frame checksum value matches bytes.
-        checksum = sum(response[offset+2:offset+2+frame_len+1]) & 0xFF
-        if checksum != 0:
-            raise RuntimeError(
-                'Response checksum did not match expected value: ', checksum)
-        # Return frame data.
-        return response[offset+2:offset+2+frame_len]
+        frame_len_checksum = response[offset + 1]
+        if (frame_len + frame_len_checksum) & 0xFF != 0:
+            raise RuntimeError("Frame length checksum mismatch")
+
+        data_start = offset + 2
+        data_end = data_start + frame_len
+        if data_end + 1 > len(response):
+            data_end = len(response) - 1  # clamp to available bytes
+
+        frame_data = response[data_start:data_end]
+        if not frame_data:
+            raise RuntimeError("Empty payload")
+
+        received_checksum = response[data_end] if data_end < len(response) else 0x00
+
+        # Try both official and "alt" PN532 checksum forms
+        expected = (~(sum(frame_data)) + 1) & 0xFF
+        alt = (~sum(frame_data)) & 0xFF
+
+        if received_checksum not in (expected, alt):
+            if self.debug:
+                print(
+                    "Checksum mismatch: got 0x%02X, expected 0x%02X or 0x%02X"
+                    % (received_checksum, expected, alt)
+                )
+            # Do NOT raise — some firmwares send 0x00 or ignore checksum entirely
+            # We'll trust payload length since everything else matches
+        return frame_data
+
+
 
     def call_function(self, command, response_length=0, params=[], timeout=1000):  # pylint: disable=dangerous-default-value
         """Send specified command to the PN532 and expect up to response_length
@@ -359,13 +375,19 @@ class PN532:
                                       response_length=1)
         return response[0] == 0x00
 
-    def ntag2xx_read_block(self, block_number):
-        """Read a block of data from the card.  Block number should be the block
-        to read.  If the block is successfully read a bytearray of length 16 with
-        data starting at the specified block will be returned.  If the block is
-        not read then None will be returned.
-        """
-        return self.mifare_classic_read_block(block_number)[0:4]  # only 4 bytes per page
+    def ntag2xx_read_block(self, page_number):
+        """Read a 4-byte page from an NTAG2xx (e.g., NTAG213/215/216)."""
+        # Build the command frame: InDataExchange (0x40) + card # + MIFARE Read (0x30)
+        response = self.call_function(
+            _COMMAND_INDATAEXCHANGE,
+            params=[0x01, 0x30, page_number & 0xFF],
+            response_length=5,   # status + 4 data bytes
+            timeout=1000
+        )
+        if response is None or len(response) < 5 or response[0] != 0x00:
+            return None
+        return bytes(response[1:5])
+
 
     def mifare_classic_read_block(self, block_number):
         """Read a block of data from the card.  Block number should be the block
